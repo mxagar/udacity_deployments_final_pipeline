@@ -8,7 +8,7 @@ Parameters:
 
   EksClusterName:
     Type: String
-    Description: TODO - The name of the EKS cluster created
+    Description: The name of the EKS cluster created
     Default: eksctl-demo
     MinLength: 1
     MaxLength: 100
@@ -16,8 +16,8 @@ Parameters:
 
   GitSourceRepo:
     Type: String
-    Description: TODO - GitHub source repository - must contain a Dockerfile and buildspec.yml in the base
-    Default: cd0157_Final_Pipeline
+    Description: The GitHub source repository - must contain a Dockerfile and buildspec.yml in the base
+    Default: udacity_deployments_final_pipeline
     MinLength: 1
     MaxLength: 100
     ConstraintDescription: You must enter a GitHub repository name
@@ -25,7 +25,7 @@ Parameters:
   GitBranch:
     Type: String
     Default: main
-    Description: TODO - GitHub git repository branch - change triggers a new build
+    Description: GitHub git repository branch - change triggers a new build
     MinLength: 1
     MaxLength: 100
     ConstraintDescription: You must enter a GitHub repository branch name
@@ -33,22 +33,22 @@ Parameters:
   GitHubToken:
     Type: String
     NoEcho: true
-    Description: TODO - GitHub API token - see https://github.com/blog/1509-personal-api-tokens
+    Description: GitHub API token -- see https://github.com/blog/1509-personal-api-tokens
     MinLength: 3
     MaxLength: 100
-    ConstraintDescription: You must enter a GitHub personal access token
+    ConstraintDescription: You must enter a GitHub personal access token (not here, but in CloudFormation)
 
   GitHubUser:
     Type: String
-    Default: SudKul
-    Description: TODO - GitHub username or organization
+    Default: mxagar
+    Description: GitHub username or organization
     MinLength: 3
     MaxLength: 100
     ConstraintDescription: You must enter a GitHub username or organization
 
   CodeBuildDockerImage:
     Type: String
-    Default: aws/codebuild/standard:4.0
+    Default: aws/codebuild/standard:8.0
     Description: AWS CodeBuild Docker optimized image
     MinLength: 3
     MaxLength: 100
@@ -57,7 +57,7 @@ Parameters:
   KubectlRoleName:
     Type: String
     Default: UdacityFlaskDeployCBKubectlRole
-    Description: TODO - IAM role used by kubectl to interact with EKS cluster
+    Description: IAM role used by kubectl to interact with EKS cluster
     MinLength: 3
     MaxLength: 100
     ConstraintDescription: You must enter a kubectl IAM role
