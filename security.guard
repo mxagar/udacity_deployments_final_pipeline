@@ -1,0 +1,55 @@
+# Scoped security invariants for this learning pipeline, not a complete compliance audit.
+let buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+let repositories = Resources.*[ Type == 'AWS::ECR::Repository' ]
+let access_entries = Resources.*[ Type == 'AWS::EKS::AccessEntry' ]
+
+rule artifact_bucket_security when %buckets !empty {
+  %buckets {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      PublicAccessBlockConfiguration {
+        BlockPublicAcls == true
+        BlockPublicPolicy == true
+        IgnorePublicAcls == true
+        RestrictPublicBuckets == true
+      }
+      BucketEncryption.ServerSideEncryptionConfiguration[*].ServerSideEncryptionByDefault.SSEAlgorithm IN ['AES256', 'aws:kms']
+      VersioningConfiguration.Status == 'Enabled'
+    }
+  }
+}
+
+rule immutable_scanned_images when %repositories !empty {
+  %repositories.Properties {
+    ImageTagMutability == 'IMMUTABLE'
+    ImageScanningConfiguration.ScanOnPush == true
+    EncryptionConfiguration.EncryptionType == 'AES256'
+  }
+}
+
+rule scoped_kubernetes_identity when %access_entries !empty {
+  %access_entries.Properties {
+    Type == 'STANDARD'
+    KubernetesGroups == ['final-pipeline-deployer']
+    AccessPolicies !exists
+  }
+}
+
+rule tls_only_artifacts {
+  Resources.ArtifactBucketPolicy.Properties.PolicyDocument.Statement[*] {
+    Effect == 'Deny'
+    Action == 's3:*'
+    Condition.Bool.'aws:SecureTransport' == 'false'
+  }
+}
+
+rule modern_source_and_runtime {
+  Parameters.GitHubToken !exists
+  Resources.CustomResourceLambda !exists
+  Resources.CodePipelineGitHub.Properties {
+    PipelineType == 'V2'
+    ExecutionMode == 'QUEUED'
+    Stages[0].Actions[0].ActionTypeId.Provider == 'CodeStarSourceConnection'
+  }
+}

@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: simple-flask-deployment
+  namespace: deployment-tests
   labels:
     app: simple-flask
 spec:
@@ -12,20 +13,71 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 2
-      maxSurge: 2
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
         app: simple-flask
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: simple-flask
-        # image: IMAGE_TAG
-        image: sudkul/simple-flask
+        # scripts/pipeline.sh renders this into deployment.rendered.yml.
+        image: CONTAINER_IMAGE
         securityContext:
           privileged: false
-          readOnlyRootFilesystem: false
+          readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
         ports:
-          - containerPort: 8080
+          - name: http
+            containerPort: 8080
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-flask-deployment
+  namespace: deployment-tests
+spec:
+  type: ClusterIP
+  selector:
+    app: simple-flask
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

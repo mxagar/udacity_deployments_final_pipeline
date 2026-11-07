@@ -1,0 +1,6 @@
+# Only application inputs belong in the build context; exclude .env and Git data.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!app.py
