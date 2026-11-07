@@ -1,153 +1,300 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: >-
-  Build a Flask image from GitHub and deploy it to an existing EKS cluster using
-  CodeConnections, CodeBuild, and namespace-scoped Kubernetes RBAC.
-Metadata:
-  AWSToolsMetrics:
-    AWSAgentToolkit: aws-cloudformation@3
-  com.aws.cloudformation.Context:
-    ref:
-      - at: README.md
-        has: setup, architecture, permissions, validation, and cleanup
-        scope: stack
-    must:
-      - The existing cluster must be in the stack Region and support EKS access entries.
-      - Apply rbac.yml as a cluster administrator before creating the stack.
-      - ConnectionArn must identify an AVAILABLE connection authorized for the source repository.
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: EKSWSV1
+
+
 Parameters:
+
   EksClusterName:
     Type: String
+    Description: The name of the EKS cluster created
     Default: eksctl-demo
-    AllowedPattern: "[A-Za-z0-9][A-Za-z0-9_-]*"
+    MinLength: 1
     MaxLength: 100
-    Description: Existing EKS cluster in this stack's Region.
-  GitHubUser:
-    Type: String
-    Default: mxagar
-    AllowedPattern: "[A-Za-z0-9][A-Za-z0-9-]*"
-    MaxLength: 100
-    Description: GitHub repository owner (case-sensitive).
+    ConstraintDescription: You must enter the EKS cluster name
+
   GitSourceRepo:
     Type: String
+    Description: The GitHub source repository - must contain a Dockerfile and buildspec.yml in the base
     Default: udacity_deployments_final_pipeline
-    AllowedPattern: "[A-Za-z0-9_.-]+"
+    MinLength: 1
     MaxLength: 100
-    Description: Repository containing Dockerfile and buildspec.yml at its root.
+    ConstraintDescription: You must enter a GitHub repository name
+
   GitBranch:
     Type: String
     Default: main
+    Description: GitHub git repository branch - change triggers a new build
     MinLength: 1
-    MaxLength: 255
-    Description: Branch whose pushes trigger the pipeline.
-  ConnectionArn:
+    MaxLength: 100
+    ConstraintDescription: You must enter a GitHub repository branch name
+
+  GitHubToken:
     Type: String
-    AllowedPattern: "arn:[^:]+:(codeconnections|codestar-connections):[^:]+:[0-9]{12}:connection/[A-Za-z0-9-]+"
-    Description: An existing AVAILABLE GitHub CodeConnections connection in this Region.
+    NoEcho: true
+    Description: GitHub API token -- see https://github.com/blog/1509-personal-api-tokens
+    MinLength: 3
+    MaxLength: 100
+    ConstraintDescription: You must enter a GitHub personal access token (not here, but in CloudFormation)
+
+  GitHubUser:
+    Type: String
+    Default: mxagar
+    Description: GitHub username or organization
+    MinLength: 3
+    MaxLength: 100
+    ConstraintDescription: You must enter a GitHub username or organization
+
   CodeBuildDockerImage:
     Type: String
     Default: aws/codebuild/standard:8.0
-    AllowedValues:
-      - aws/codebuild/standard:8.0
-    Description: Ubuntu 24.04 x86-64 managed image with Python 3.13 and AWS CLI v2.
-Conditions:
-  LegacyConnection: !Equals [!Select [2, !Split [":", !Ref ConnectionArn]], codestar-connections]
+    Description: AWS CodeBuild Docker optimized image
+    MinLength: 3
+    MaxLength: 100
+    ConstraintDescription: You must enter a CodeBuild Docker image
+
+  KubectlRoleName:
+    Type: String
+    Default: UdacityFlaskDeployCBKubectlRole
+    Description: IAM role used by kubectl to interact with EKS cluster
+    MinLength: 3
+    MaxLength: 100
+    ConstraintDescription: You must enter a kubectl IAM role
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub
+        Parameters:
+          - GitHubUser
+          - GitHubToken
+          - GitSourceRepo
+          - GitBranch
+      - Label:
+          default: CodeBuild
+        Parameters:
+          - CodeBuildDockerImage
+      - Label:
+          default: IAM
+        Parameters:
+          - KubectlRoleName
+      - Label:
+          default: EKS
+        Parameters:
+          - EksClusterName
+    ParameterLabels:
+      GitHubUser:
+        default: Username
+      GitHubToken:
+        default: Access token
+      GitSourceRepo:
+        default: Repository
+      GitBranch:
+        default: Branch
+      CodeBuildDockerImage:
+        default: Docker image
+      KubectlRoleName:
+        default: kubectl IAM role
+      EksClusterName:
+        default: EKS cluster name
+
+
 Resources:
+
   EcrDockerRepository:
     Type: AWS::ECR::Repository
     DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: keeps uniquely tagged application images available after stack deletion
-        must:
-          - Preserve retained images; remove them separately only after tests no longer need them.
-    Properties:
-      ImageTagMutability: IMMUTABLE
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      EncryptionConfiguration:
-        EncryptionType: AES256
+
   CodePipelineArtifactBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: private versioned pipeline artifacts; retained for failed-build investigation
-        must:
-          - Keep encryption, public-access blocking, and HTTPS enforcement.
+
+  CustomResourceLambda:
+    Type: AWS::Lambda::Function
     Properties:
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      VersioningConfiguration:
-        Status: Enabled
-  ArtifactBucketPolicy:
-    Type: AWS::S3::BucketPolicy
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from urllib.request import Request, urlopen
+          def handler(event, context):
+            response = {
+              'Status': 'SUCCESS',
+              "Reason": "See the details in CloudWatch Log Stream: " + context.log_stream_name,
+              'PhysicalResourceId': context.log_stream_name,
+              'StackId': event['StackId'],
+              'RequestId': event['RequestId'],
+              'LogicalResourceId': event['LogicalResourceId'],
+              'Data': {"Message": "Resource creation successful!"},
+            }
+
+            client = boto3.client('iam')
+            try:
+              if event['RequestType'] == 'Create':
+                kubectl_role_name = event['ResourceProperties']['KubectlRoleName']
+                build_role_arn = event['ResourceProperties']['CodeBuildServiceRoleArn']
+
+                assume = client.get_role(RoleName = kubectl_role_name)
+                assume_doc = assume['Role']['AssumeRolePolicyDocument']
+                roles = [ { 'Effect': 'Allow', 'Principal': { 'AWS': build_role_arn }, 'Action': 'sts:AssumeRole' } ]
+
+                for statement in assume_doc['Statement']:
+                  if 'AWS' in statement['Principal']:
+                    if statement['Principal']['AWS'].startswith('arn:aws:iam:'):
+                      roles.append(statement)
+
+                assume_doc['Statement'] = roles
+                update_response = client.update_assume_role_policy(RoleName = kubectl_role_name, PolicyDocument = json.dumps(assume_doc))
+            except Exception as e:
+              print(e)
+              response['Status'] = 'FAILED'
+              response["Reason"] = str(e)
+              response['Data'] = {"Message": "Resource creation failed"}
+
+            response_body = json.dumps(response)
+            headers = {'content-type': '', "content-length": str(len(response_body)) }
+            request = Request(event['ResponseURL'], data=response_body.encode('utf-8'), headers=headers, method='PUT')
+            with urlopen(request, timeout=10) as result:
+              result.read()
+            return response
+
+      Handler: index.handler
+      Role: !GetAtt CustomResourceLambdaExecutionRole.Arn
+      Runtime: python3.13
+      Timeout: 300
+
+  CustomResourceLambdaExecutionRole:
+    Type: AWS::IAM::Role
     Properties:
-      Bucket: !Ref CodePipelineArtifactBucket
-      PolicyDocument:
-        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaENIManagementAccess
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
         Statement:
-          - Sid: RequireTLS
-            Effect: Deny
-            Principal: "*"
-            Action: s3:*
-            Resource:
-              - !GetAtt CodePipelineArtifactBucket.Arn
-              - !Sub "${CodePipelineArtifactBucket.Arn}/*"
-            Condition:
-              Bool:
-                aws:SecureTransport: "false"
-  BuildLogGroup:
-    Type: AWS::Logs::LogGroup
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${KubectlRoleName}
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:UpdateAssumeRolePolicy
+
+  KubectlAssumeRoleCustomResource:
+    Type: Custom::CustomResource
     Properties:
-      LogGroupName: !Sub "/aws/codebuild/${AWS::StackName}"
-      RetentionInDays: 14
+      ServiceToken: !GetAtt CustomResourceLambda.Arn
+      KubectlRoleName: !Ref KubectlRoleName
+      CodeBuildServiceRoleArn: !GetAtt CodeBuildServiceRole.Arn
+    DependsOn:
+      - CustomResourceLambda
+      - CodeBuildServiceRole
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                  - iam:PassRole
+              - Resource: !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+    DependsOn: CodePipelineArtifactBucket
+
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: build identity can access only this stack's artifacts, image repository, and logs
-        must:
-          - Keep Kubernetes deployment permissions on the separate deploy role.
     Properties:
+      Path: /
       AssumeRolePolicyDocument:
-        Version: "2012-10-17"
+        Version: 2012-10-17
         Statement:
           - Effect: Allow
             Principal:
               Service: codebuild.amazonaws.com
             Action: sts:AssumeRole
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-              ArnLike:
-                aws:SourceArn: !Sub "arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}"
       Policies:
-        - PolicyName: BuildArtifactsAndImages
+        - PolicyName: root
           PolicyDocument:
-            Version: "2012-10-17"
+            Version: 2012-10-17
             Statement:
-              - Effect: Allow
-                Action: [logs:CreateLogStream, logs:PutLogEvents]
-                Resource: !GetAtt BuildLogGroup.Arn
-              - Effect: Allow
-                Action: [s3:GetBucketLocation, s3:GetBucketVersioning, s3:ListBucket]
-                Resource: !GetAtt CodePipelineArtifactBucket.Arn
-              - Effect: Allow
-                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject]
-                Resource: !Sub "${CodePipelineArtifactBucket.Arn}/*"
-              - Effect: Allow
-                Action: ecr:GetAuthorizationToken
-                Resource: "*"
-              - Effect: Allow
+              - Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${KubectlRoleName}
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - eks:Describe*
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - ssm:GetParameters
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+              - Resource: '*'
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeDhcpOptions
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                  - ec2:CreateNetworkInterfacePermission
+              - Resource: !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepository}
+                Effect: Allow
                 Action:
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
@@ -156,78 +303,10 @@ Resources:
                   - ecr:InitiateLayerUpload
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
-                Resource: !GetAtt EcrDockerRepository.Arn
-  EksDeployRole:
-    Type: AWS::IAM::Role
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: native IAM resource replaces the old trust-policy-mutating Lambda
-        must:
-          - Trust only this stack's CodeBuild role.
-          - Kubernetes permissions come from the access entry and rbac.yml, never system:masters.
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              AWS: !GetAtt CodeBuildServiceRole.Arn
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: DescribeTargetCluster
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action: eks:DescribeCluster
-                Resource: !Sub "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EksClusterName}"
-  CodeBuildEksPolicy:
-    Type: AWS::IAM::Policy
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: separate policy avoids circular dependencies between the two IAM roles
-        must:
-          - Allow assumption only of this stack's deploy role.
-    Properties:
-      PolicyName: DescribeAndAssumeDeployRole
-      Roles: [!Ref CodeBuildServiceRole]
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Action: sts:AssumeRole
-            Resource: !GetAtt EksDeployRole.Arn
-          - Effect: Allow
-            Action: eks:DescribeCluster
-            Resource: !Sub "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EksClusterName}"
-  EksDeployAccessEntry:
-    Type: AWS::EKS::AccessEntry
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: maps the deploy role to a namespace-scoped Kubernetes group without aws-auth edits
-        must:
-          - rbac.yml must bind final-pipeline-deployer in deployment-tests.
-          - The cluster authentication mode must be API or API_AND_CONFIG_MAP.
-    Properties:
-      ClusterName: !Ref EksClusterName
-      PrincipalArn: !GetAtt EksDeployRole.Arn
-      Type: STANDARD
-      KubernetesGroups: [final-pipeline-deployer]
+
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
-    DependsOn:
-      - CodeBuildEksPolicy
-      - EksDeployAccessEntry
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: builds and smoke-tests the image, then applies only application resources
-        must:
-          - Keep privileged mode for Docker and CODEPIPELINE source/artifacts.
-          - RBAC bootstrap is performed by an administrator, never by the build.
     Properties:
-      Name: !Ref AWS::StackName
-      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
-      TimeoutInMinutes: 20
       Artifacts:
         Type: CODEPIPELINE
       Source:
@@ -236,70 +315,25 @@ Resources:
         ComputeType: BUILD_GENERAL1_SMALL
         Type: LINUX_CONTAINER
         Image: !Ref CodeBuildDockerImage
-        PrivilegedMode: true
         EnvironmentVariables:
           - Name: REPOSITORY_URI
-            Value: !GetAtt EcrDockerRepository.RepositoryUri
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrDockerRepository}
+          - Name: REPOSITORY_NAME
+            Value: !Ref GitSourceRepo
+          - Name: REPOSITORY_BRANCH
+            Value: !Ref GitBranch
           - Name: EKS_CLUSTER_NAME
             Value: !Ref EksClusterName
           - Name: EKS_KUBECTL_ROLE_ARN
-            Value: !GetAtt EksDeployRole.Arn
-      LogsConfig:
-        CloudWatchLogs:
-          Status: ENABLED
-          GroupName: !Ref BuildLogGroup
-  CodePipelineServiceRole:
-    Type: AWS::IAM::Role
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: connection access is limited to the selected repository and branch
-        must:
-          - Keep UseConnection scoped to ConnectionArn and source repository.
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codepipeline.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: PipelineSourceAndBuild
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action: !If [LegacyConnection, codestar-connections:UseConnection, codeconnections:UseConnection]
-                Resource: !Ref ConnectionArn
-                Condition: !If
-                  - LegacyConnection
-                  - StringEquals:
-                      codestar-connections:FullRepositoryId: !Sub "${GitHubUser}/${GitSourceRepo}"
-                      codestar-connections:BranchName: !Ref GitBranch
-                  - StringEquals:
-                      codeconnections:FullRepositoryId: !Sub "${GitHubUser}/${GitSourceRepo}"
-                      codeconnections:BranchName: !Ref GitBranch
-              - Effect: Allow
-                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds]
-                Resource: !GetAtt CodeBuildProject.Arn
-              - Effect: Allow
-                Action: [s3:GetBucketLocation, s3:GetBucketVersioning, s3:ListBucket]
-                Resource: !GetAtt CodePipelineArtifactBucket.Arn
-              - Effect: Allow
-                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject]
-                Resource: !Sub "${CodePipelineArtifactBucket.Arn}/*"
+            Value: !Sub arn:aws:iam::${AWS::AccountId}:role/${KubectlRoleName}
+        PrivilegedMode: true
+      Name: !Ref AWS::StackName
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+    DependsOn: KubectlAssumeRoleCustomResource
+
   CodePipelineGitHub:
     Type: AWS::CodePipeline::Pipeline
-    DependsOn: ArtifactBucketPolicy
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: GitHub App source replaces personal tokens; queued builds prevent concurrent rollouts
-        must:
-          - Authorize ConnectionArn through the AWS console before deployment.
     Properties:
-      Name: !Ref AWS::StackName
-      PipelineType: V2
-      ExecutionMode: QUEUED
       RoleArn: !GetAtt CodePipelineServiceRole.Arn
       ArtifactStore:
         Type: S3
@@ -310,15 +344,14 @@ Resources:
             - Name: App
               ActionTypeId:
                 Category: Source
-                Owner: AWS
-                Provider: CodeStarSourceConnection
-                Version: "1"
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
               Configuration:
-                ConnectionArn: !Ref ConnectionArn
-                FullRepositoryId: !Sub "${GitHubUser}/${GitSourceRepo}"
-                BranchName: !Ref GitBranch
-                DetectChanges: "true"
-                OutputArtifactFormat: CODE_ZIP
+                Owner: !Ref GitHubUser
+                Repo: !Ref GitSourceRepo
+                Branch: !Ref GitBranch
+                OAuthToken: !Ref GitHubToken
               OutputArtifacts:
                 - Name: App
               RunOrder: 1
@@ -328,8 +361,8 @@ Resources:
               ActionTypeId:
                 Category: Build
                 Owner: AWS
+                Version: 1
                 Provider: CodeBuild
-                Version: "1"
               Configuration:
                 ProjectName: !Ref CodeBuildProject
               InputArtifacts:
@@ -337,16 +370,4 @@ Resources:
               OutputArtifacts:
                 - Name: BuildOutput
               RunOrder: 1
-Outputs:
-  DeployRoleArn:
-    Description: IAM role mapped to the final-pipeline-deployer Kubernetes group.
-    Value: !GetAtt EksDeployRole.Arn
-  PipelineName:
-    Description: Pipeline to release after pushing changes.
-    Value: !Ref CodePipelineGitHub
-  ImageRepository:
-    Description: ECR repository retained after stack deletion.
-    Value: !GetAtt EcrDockerRepository.RepositoryUri
-  ArtifactBucket:
-    Description: Artifact bucket retained after stack deletion.
-    Value: !Ref CodePipelineArtifactBucket
+    DependsOn: CodeBuildProject

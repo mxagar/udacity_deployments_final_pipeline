@@ -3,24 +3,45 @@ version: 0.2
 env:
   shell: bash
   variables:
-    UV_VERSION: "0.13.5"
+    # Match the EKS control plane minor version; this exercise uses Kubernetes 1.34.
+    KUBECTL_VERSION: v1.34.13
 
 phases:
   install:
     runtime-versions:
       python: "3.13"
     commands:
-      - bash scripts/pipeline.sh install
+      - |
+        if ! docker info >/dev/null 2>&1; then
+          nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --storage-driver=overlay2 &
+          timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+        fi
+      - curl -fsSL https://astral.sh/uv/0.13.5/install.sh -o /tmp/install-uv.sh
+      - UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh /tmp/install-uv.sh
+      - uv sync --locked --no-dev
+      - curl -fsSL -o kubectl "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+      - curl -fsSL -o kubectl.sha256 "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl.sha256"
+      - echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+      - chmod +x kubectl
+      - export PATH="$PWD:$PATH"
+      - kubectl version --client
+      - aws --version
   pre_build:
     commands:
-      - bash scripts/pipeline.sh pre-build
+      - TAG="$REPOSITORY_NAME.$REPOSITORY_BRANCH.${ENVIRONMENT_NAME:-test}.$(date +%Y-%m-%d.%H.%M.%S).$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | head -c 8)"
+      - sed -i 's@CONTAINER_IMAGE@'"$REPOSITORY_URI:$TAG"'@' deployment.yml
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "${REPOSITORY_URI%%/*}"
+      - export KUBECONFIG="$HOME/.kube/config"
   build:
     commands:
-      - bash scripts/pipeline.sh build
+      - docker build --tag "$REPOSITORY_URI:$TAG" .
   post_build:
     commands:
-      - bash scripts/pipeline.sh deploy
+      - test "$CODEBUILD_BUILD_SUCCEEDING" = "1"
+      - docker push "$REPOSITORY_URI:$TAG"
+      - aws eks update-kubeconfig --region "$AWS_DEFAULT_REGION" --name "$EKS_CLUSTER_NAME" --role-arn "$EKS_KUBECTL_ROLE_ARN"
+      - kubectl apply -f deployment.yml
+      - printf '[{"name":"eksctl-demo","imageUri":"%s"}]' "$REPOSITORY_URI:$TAG" > build.json
 
 artifacts:
-  files:
-    - build.json
+  files: build.json

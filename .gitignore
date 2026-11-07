@@ -1,8 +1,5 @@
 .env
 .venv/
-.test-venv/
 __pycache__/
 *.py[cod]
-.kube/
-deployment.rendered.yml
 build.json
